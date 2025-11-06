@@ -4,11 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "GITHUB_PAGES=false next build && next export",
-    "preview": "vite preview",
-    "build:gh": "GITHUB_PAGES=true next build && next export",
-    "deploy": "gh-pages -d out -b gh-pages"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --host --port 4173"
   },
   "dependencies": {
     "@stripe/react-stripe-js": "4.0.2",
