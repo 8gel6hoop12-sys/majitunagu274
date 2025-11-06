@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "next build && next export",
     "preview": "vite preview --host --port 4173",
     "predeploy": "cross-env BASE_PATH=/majitunagu/ vite build && node -e \"require('fs').copyFileSync('out/index.html','out/404.html')\"",
-    "deploy": "gh-pages -d out -b gh-pages -t true"
+    "deploy": "gh-pages -d out -b gh-pages -t true",
+    "start": "serve out -p 3000"
   },
   "dependencies": {
     "@stripe/react-stripe-js": "4.0.2",
