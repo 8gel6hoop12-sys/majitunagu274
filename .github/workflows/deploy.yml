@@ -1,20 +1,56 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react-swc'
-import { resolve } from 'node:path'
+name: Deploy (Vite → GitHub Pages / Project Site)
 
-// CI上＝Actions上だけ /<repo>/ に、自動フォールバック
-const repo = process.env.GITHUB_REPOSITORY?.split('/')[1] ?? ''
-const ciBase = process.env.GITHUB_ACTIONS ? `/${repo}/` : '/'
-const base = process.env.BASE_PATH || ciBase
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
 
-export default defineConfig({
-  define: {
-    __BASE_PATH__: JSON.stringify(base),
-    __IS_PREVIEW__: JSON.stringify(!!process.env.IS_PREVIEW)
-  },
-  plugins: [react()],
-  base,
-  build: { sourcemap: true, outDir: 'out' },
-  resolve: { alias: { '@': resolve(__dirname, './src') } },
-  server: { port: 3000, host: '0.0.0.0' }
-})
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # プロジェクトサイト用：/<repo>/ を本番のベースパスに注入
+    env:
+      BASE_PATH: "/${{ github.event.repository.name }}/"
+      IS_PREVIEW: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build   # vite.config.ts の outDir=out を前提に
+
+      - name: Add .nojekyll
+        run: echo > out/.nojekyll
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./out
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
