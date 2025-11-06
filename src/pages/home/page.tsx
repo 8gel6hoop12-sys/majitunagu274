@@ -1,5 +1,6 @@
+'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useRef, useState, startTransition } from 'react';
 import Header from '../../components/feature/Header';
 import Hero from '../../components/feature/Hero';
 import SearchLauncher from '../../components/feature/SearchLauncher';
@@ -10,6 +11,22 @@ import Button from '../../components/base/Button';
 import Input from '../../components/base/Input';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 
+/* ================================
+   設定（URLはここだけ触ればOK）
+   ================================ */
+const SUBMISSIONS_CSV_URL =
+  'https://docs.google.com/spreadsheets/d/e/2PACX-1vTjQOVT36ZHz4MOPiXzd7JBWe5AHv27xcYs4x8DDMXuPiooVaIOsESJMn2zjQMorB8iPxgeQu4XpIGO/pub?gid=0&single=true&output=csv';
+const PROFILES_CSV_URL =
+  'https://docs.google.com/spreadsheets/d/e/2PACX-1vTjQOVT36ZHz4MOPiXzd7JBWe5AHv27xcYs4x8DDMXuPiooVaIOsESJMn2zjQMorB8iPxgeQu4XpIGO/pub?gid=896826220&single=true&output=csv';
+/** GAS Webアプリ（「全員」アクセス可でデプロイした最新の /exec URL） */
+const WRITE_BASE =
+  'https://script.google.com/macros/s/AKfycbw_5VtO-qTJj-OnK9TGN0LBSj9mfx4dAsOn7UfTcoLh62c8vG6_HXJzKIeDr85WgPaX/exec';
+
+const LINE_ADD_URL = 'https://lin.ee/GrVcrFQ';
+
+/* ================================
+   型
+   ================================ */
 interface Job {
   id: number;
   title: string;
@@ -26,16 +43,15 @@ interface Job {
   image?: string;
   approved: boolean;
 }
-
 interface Profile {
-  email: string;
+  email: string;        // 表示用（入力そのまま）
   name: string;
   university: string;
   password: string;
   createdAt: string;
   updatedAt: string;
+  emailKey?: string;    // 判定用（lower/全半角正規化）
 }
-
 interface Filters {
   q: string;
   jobType: string;
@@ -47,399 +63,487 @@ interface Filters {
   activeYear: string;
 }
 
+/* ================================
+   ユーティリティ（正規化・CSV）
+   ================================ */
+const toAsciiBasic = (s: string) => {
+  if (!s) return s;
+  const map: Record<string, string> = {
+    '＠': '@','．': '.','，': ',','：': ':','；': ';','（': '(','）': ')','［': '[','］': ']','｛': '{','｝': '}',
+    '！': '!','？': '?','＋': '+','−': '-','ー': '-','＿': '_','　': ' '
+  };
+  s = s.replace(/[＠．，：；（）［］｛｝！？＋−ー＿　]/g, ch => map[ch] ?? ch);
+  return s.replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
+};
+const normEmail = (s: string) => toAsciiBasic((s || '').trim()).toLowerCase();
+const normText  = (s: string) => (s || '').trim();
+const emailValid = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+const cb = (url: string) => `${url}${url.includes('?') ? '&' : '?'}cb=${Date.now()}`;
+const deepEqual = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
+
+/** CSV → rows */
+function parseCsvToObjects(text: string): Record<string, string>[] {
+  if (!text) return [];
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  const rows: string[][] = [];
+  let cur = '', q = false, r: string[] = [];
+  const pushCell = () => { r.push(cur); cur = ''; };
+  const pushRow = () => { rows.push(r.slice()); r = []; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], n = text[i + 1];
+    if (c === '"' && q && n === '"') { cur += '"'; i++; continue; }
+    if (c === '"') { q = !q; continue; }
+    if (c === ',' && !q) { pushCell(); continue; }
+    if ((c === '\n' || c === '\r') && !q) { pushCell(); if (r.length > 1 || r[0] !== '') pushRow(); if (c === '\r' && n === '\n') i++; continue; }
+    cur += c;
+  }
+  pushCell(); if (r.length > 1 || r[0] !== '') pushRow();
+  if (!rows.length) return [];
+  const headers = rows[0].map(h => h.trim());
+  return rows.slice(1).map(row => {
+    const o: Record<string, string> = {};
+    headers.forEach((h, i) => (o[h] = (row[i] ?? '').trim()));
+    return o;
+  });
+}
+
+function mapRowsToJobs(rows: Record<string, string>[]): Job[] {
+  return rows.map((r, idx) => {
+    const ap = String(r.approved ?? '').toLowerCase();
+    const tags = (r.tags ?? '').split(',').map(s => s.trim()).filter(Boolean);
+    const id = Number(r.id) || Date.now() + idx;
+    return {
+      id,
+      title: r.title || '',
+      company: r.company || '',
+      year: r.year || '',
+      jobType: r.jobType || '',
+      mode: r.mode || '',
+      place: r.place || '',
+      dateStart: r.dateStart || r.start || '',
+      dateEnd: r.dateEnd || r.end || r.dateStart || '',
+      tags,
+      desc: r.desc || r.description || '',
+      applyUrl: r.applyUrl || r.url || '',
+      image: r.image || r.image_url || '',
+      approved: ap === 'true' || ap === '1' || ap === 'yes'
+    };
+  });
+}
+
+function mapRowsToProfiles(rows: Record<string, string>[]): Profile[] {
+  const out = rows
+    .filter(r => (r.email ?? '').trim())
+    .map(r => {
+      const email = r.email || '';
+      const emailKey = normEmail(email);
+      return {
+        email,
+        name: r.name || '',
+        university: r.university || '',
+        password: r.password || '',
+        createdAt: r.createdAt || '',
+        updatedAt: r.updatedAt || '',
+        emailKey
+      };
+    });
+
+  // 同一 emailKey の重複を createdAt/updatedAt 新しい方で吸収
+  const byKey = new Map<string, Profile>();
+  for (const p of out) {
+    const prev = byKey.get(p.emailKey!);
+    if (!prev) { byKey.set(p.emailKey!, p); continue; }
+    const newer = (a: string, b: string) => (a && b ? (a > b ? a : b) : (a || b));
+    byKey.set(p.emailKey!, {
+      ...prev,
+      ...p,
+      createdAt: prev.createdAt || p.createdAt,
+      updatedAt: newer(prev.updatedAt, p.updatedAt)
+    });
+  }
+  return Array.from(byKey.values());
+}
+
+/* ================================
+   ログインの“端末分離”実装（トークン × デバイスID）
+   ================================ */
+const DEVICE_ID_KEY = 'mt_device_id';
+const TOKEN_KEY_SS  = 'mt_login_token_ss'; // sessionStorage（既定）
+const TOKEN_KEY_LS  = 'mt_login_token_ls'; // localStorage（「この端末で保持」時のみ）
+
+type LoginToken = {
+  email: string;   // 表示用メール
+  deviceId: string;
+  iat: number;     // 発行時刻
+  rand: string;    // ランダム
+};
+
+// 端末IDを安全に取得（nullを排除してからset/return）
+const getDeviceId = (): string => {
+  try {
+    const saved = localStorage.getItem(DEVICE_ID_KEY);
+    if (typeof saved === 'string' && saved.length > 0) {
+      return saved; // ← ここで string が確定
+    }
+    const newId =
+      (crypto as any)?.randomUUID?.() ??
+      `dev_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+    localStorage.setItem(DEVICE_ID_KEY, newId); // ← newId は string
+    return newId;
+  } catch {
+    // ブラウザ制限で localStorage が使えなくても動作継続
+    return 'dev_fallback';
+  }
+};
+
+// トークン読取（nullを弾いてから JSON.parse）
+const readToken = (): LoginToken | null => {
+  try {
+    const ss = sessionStorage.getItem(TOKEN_KEY_SS);
+    const ls = localStorage.getItem(TOKEN_KEY_LS);
+    const raw = ss ?? ls;           // string | null
+    if (!raw) return null;          // ← null を先に弾く
+    const tok = JSON.parse(raw) as LoginToken;
+    if (!tok?.email || !tok?.deviceId) return null;
+    return tok;
+  } catch {
+    return null;
+  }
+};
+
+const clearToken = () => {
+  try { sessionStorage.removeItem(TOKEN_KEY_SS); } catch {}
+  try { localStorage.removeItem(TOKEN_KEY_LS); } catch {}
+};
+
+const finalizeLogin = (email: string, remember: boolean) => {
+  const token: LoginToken = {
+    email,
+    deviceId: getDeviceId(),
+    iat: Date.now(),
+    rand: Math.random().toString(36).slice(2)
+  };
+  try {
+    sessionStorage.setItem(TOKEN_KEY_SS, JSON.stringify(token));
+    if (remember) {
+      localStorage.setItem(TOKEN_KEY_LS, JSON.stringify(token));
+    } else {
+      localStorage.removeItem(TOKEN_KEY_LS);
+    }
+  } catch {}
+  return token;
+};
+
+const restoreLogin = (): string => {
+  const tok = readToken();
+  if (!tok) return '';
+  // デバイス一致チェック
+  if (tok.deviceId !== getDeviceId()) {
+    clearToken();
+    return '';
+  }
+  return tok.email || '';
+};
+
+const hardLogout = () => {
+  clearToken();
+};
+
+/* ================================
+   GAS 書き込み（4段フォールバック）
+   ================================ */
+async function writeProfileRobust(baseUrl: string, p: Profile) {
+  // 送信は URLSearchParams の「文字列」を使う（BlobPart 型エラー回避）
+  const fields: Record<string, string> = {
+    type: 'profiles',
+    email: p.email,
+    name: p.name,
+    university: p.university,
+    password: p.password,
+    createdAt: p.createdAt,
+    updatedAt: p.updatedAt
+  };
+  const form = new URLSearchParams(fields).toString();
+
+  // 1) 画像ビーコン（CORS無関係にGET）
+  await new Promise<void>((resolve) => {
+    try {
+      const img = new Image();
+      img.onload = () => resolve();
+      img.onerror = () => resolve();
+      img.src = cb(`${baseUrl}?${form}`);
+      setTimeout(() => resolve(), 900);
+    } catch { resolve(); }
+  });
+
+  // 2) fetch GET (no-cors)
+  try { await fetch(cb(`${baseUrl}?${form}`), { method: 'GET', mode: 'no-cors', cache: 'no-store' }); } catch {}
+
+  // 3) fetch POST (no-cors)
+  try {
+    await fetch(baseUrl, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: form,
+      cache: 'no-store'
+    });
+  } catch {}
+
+  // 4) sendBeacon (対応ブラウザ)
+  try {
+    if ('sendBeacon' in navigator) {
+      const blob = new Blob([form], { type: 'application/x-www-form-urlencoded;charset=UTF-8' });
+      (navigator as any).sendBeacon(baseUrl, blob);
+    }
+  } catch {}
+}
+
+/* ================================
+   本体
+   ================================ */
 export default function Home() {
-  const [activeYear, setActiveYear] = useState('すべて');
   const [jobs, setJobs] = useLocalStorage<Job[]>('submissions', []);
+  const [profiles, setProfiles] = useLocalStorage<Profile[]>('profiles', []);
   const [favIds, setFavIds] = useLocalStorage<number[]>('favIds', []);
   const [currentUserEmail, setCurrentUserEmail] = useLocalStorage<string>('me_email', '');
-  const [profiles, setProfiles] = useLocalStorage<Profile[]>('profiles', []);
-  const [firstPopupDismissed, setFirstPopupDismissed] = useLocalStorage<string>('firstPopupDismissed', '');
-  
-  // モーダル状態
+
+  const [activeYear, setActiveYear] = useState('すべて');
+  const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+
+  // モーダル
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
-  const [showJobModal, setShowJobModal] = useState(false);
   const [showDrawer, setShowDrawer] = useState(false);
-  const [showFirstPopup, setShowFirstPopup] = useState(false);
-  const [showAdminModal, setShowAdminModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showContactModal, setShowContactModal] = useState(false);
-  const [selectedJob, setSelectedJob] = useState<Job | null>(null);
-  
-  // フォーム状態
+  const [showTermsModal, setShowTermsModal] = useState(false);
+  const [showPrivacyModal, setShowPrivacyModal] = useState(false);
+  const [showCompanyModal, setShowCompanyModal] = useState(false);
+
+  // 求人詳細（自前オーバーレイで「必ず」出す）
+  const [showJobOverlay, setShowJobOverlay] = useState(false);
+
+  // フォーム
   const [searchFilters, setSearchFilters] = useState<Filters>({
-    q: '',
-    jobType: '',
-    mode: '',
-    startDate: '',
-    endDate: '',
-    onlyOpen: false,
-    favOnly: false,
-    activeYear: 'すべて'
+    q: '', jobType: '', mode: '', startDate: '', endDate: '', onlyOpen: false, favOnly: false, activeYear: 'すべて'
   });
-  
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
-  const [registerForm, setRegisterForm] = useState({
-    email: '',
-    password: '',
-    name: '',
-    university: ''
-  });
+  const [rememberMe, setRememberMe] = useState(false); // ← 追加（端末保持のON/OFF）
+  const [registerForm, setRegisterForm] = useState({ email: '', password: '', name: '', university: '' });
+  const [profileForm, setProfileForm] = useState({ name: '', university: '' });
+  const [contactForm, setContactForm] = useState({ company: '', person: '', tel: '', email: '', body: '' });
 
-  const [adminForm, setAdminForm] = useState({
-    title: '',
-    company: '',
-    year: '2026',
-    jobType: 'セミナー',
-    mode: 'オンライン',
-    place: '',
-    dateStart: '',
-    dateEnd: '',
-    tags: '',
-    desc: '',
-    applyUrl: ''
-  });
-
-  const [profileForm, setProfileForm] = useState({
-    name: '',
-    university: ''
-  });
-
-  const [contactForm, setContactForm] = useState({
-    company: '',
-    person: '',
-    tel: '',
-    email: '',
-    body: ''
-  });
-  
-  // 初期データ設定
+  // ===== 初期読込（1回だけ / 差分反映でチカチカ抑制） + ログイン復元 =====
+  const didInit = useRef(false);
   useEffect(() => {
-    if (jobs.length === 0) {
-      const sampleJobs: Job[] = [
-        {
-          id: 1,
-          title: 'IT業界研究セミナー',
-          company: '株式会社テックイノベーション',
-          year: '2026',
-          jobType: 'IT・エンジニア',
-          mode: 'オンライン',
-          place: 'Zoom',
-          dateStart: '2024-02-15',
-          dateEnd: '2024-02-15',
-          tags: ['IT', 'エンジニア', 'セミナー'],
-          desc: 'IT業界の最新動向と求められるスキルについて詳しく解説します。現役エンジニアとの座談会も予定しています。プログラミング未経験者も大歓迎！業界の魅力や将来性について、実際に働く先輩たちから生の声を聞くことができます。',
-          applyUrl: 'https://example.com/apply/1',
-          image: 'https://readdy.ai/api/search-image?query=modern%20technology%20office%20with%20young%20professionals%20collaborating%20on%20computers%2C%20bright%20and%20welcoming%20workspace%20with%20natural%20lighting%2C%20diverse%20team%20of%20students%20and%20mentors%20working%20together%2C%20clean%20minimalist%20design%20with%20orange%20accents&width=400&height=240&seq=it-seminar-1&orientation=landscape',
-          approved: true
-        },
-        {
-          id: 2,
-          title: '金融業界キャリアフォーラム',
-          company: 'みらい銀行',
-          year: '2027',
-          jobType: '金融',
-          mode: '対面',
-          place: '東京国際フォーラム',
-          dateStart: '2024-02-20',
-          dateEnd: '2024-02-21',
-          tags: ['金融', '銀行', 'キャリア'],
-          desc: '金融業界の多様なキャリアパスをご紹介。銀行、証券、保険など幅広い分野の専門家が参加します。実際の業務内容から将来のキャリア展望まで、詳しくお話しします。個別相談ブースも設置予定です。',
-          applyUrl: 'https://example.com/apply/2',
-          image: 'https://readdy.ai/api/search-image?query=professional%20business%20conference%20with%20young%20people%20networking%2C%20modern%20conference%20hall%20with%20warm%20lighting%2C%20students%20talking%20with%20business%20professionals%2C%20friendly%20and%20approachable%20atmosphere%20with%20orange%20color%20scheme&width=400&height=240&seq=finance-forum-2&orientation=landscape',
-          approved: true
-        },
-        {
-          id: 3,
-          title: 'マーケティング実践ワークショップ',
-          company: 'クリエイティブマーケティング株式会社',
-          year: '2026',
-          jobType: 'マーケティング',
-          mode: 'ハイブリッド',
-          place: '渋谷オフィス + オンライン',
-          dateStart: '2024-02-25',
-          dateEnd: '2024-02-26',
-          tags: ['マーケティング', 'ワークショップ', '実践'],
-          desc: '実際のマーケティング課題に取り組む実践的なワークショップ。チーム戦でプレゼンテーションまで行います。SNSマーケティングからデジタル広告まで、最新のマーケティング手法を学べます。',
-          applyUrl: 'https://example.com/apply/3',
-          image: 'https://readdy.ai/api/search-image?query=creative%20marketing%20workshop%20with%20students%20brainstorming%2C%20colorful%20sticky%20notes%20and%20charts%20on%20walls%2C%20energetic%20young%20people%20collaborating%20in%20modern%20office%20space%2C%20bright%20and%20inspiring%20environment%20with%20orange%20highlights&width=400&height=240&seq=marketing-workshop-3&orientation=landscape',
-          approved: true
-        },
-        {
-          id: 4,
-          title: 'スタートアップ企業説明会',
-          company: 'イノベーション・ラボ株式会社',
-          year: '2027',
-          jobType: 'ベンチャー',
-          mode: 'オンライン',
-          place: 'Zoom',
-          dateStart: '2024-03-01',
-          dateEnd: '2024-03-01',
-          tags: ['スタートアップ', 'ベンチャー', '説明会'],
-          desc: '急成長中のスタートアップで働く魅力をお伝えします。大手企業とは違う、スピード感のある環境で成長したい方におすすめです。実際の社員との座談会もあります。',
-          applyUrl: 'https://example.com/apply/4',
-          image: 'https://readdy.ai/api/search-image?query=dynamic%20startup%20office%20with%20young%20entrepreneurs%2C%20modern%20open%20workspace%20with%20plants%20and%20natural%20light%2C%20diverse%20team%20of%20creative%20professionals%20collaborating%2C%20energetic%20and%20innovative%20atmosphere&width=400&height=240&seq=startup-4&orientation=landscape',
-          approved: true
-        },
-        {
-          id: 5,
-          title: '商社業界座談会',
-          company: '総合商社グローバル',
-          year: '2028',
-          jobType: '商社',
-          mode: '対面',
-          place: '大阪支社',
-          dateStart: '2024-03-05',
-          dateEnd: '2024-03-05',
-          tags: ['商社', 'グローバル', '座談会'],
-          desc: '商社の仕事内容や海外勤務について、現役社員が詳しくお話しします。グローバルに活躍したい方、語学力を活かしたい方におすすめです。海外駐在経験者との交流もあります。',
-          applyUrl: 'https://example.com/apply/5',
-          image: 'https://readdy.ai/api/search-image?query=international%20business%20meeting%20with%20diverse%20professionals%2C%20modern%20conference%20room%20with%20world%20map%2C%20young%20people%20discussing%20global%20opportunities%2C%20professional%20yet%20friendly%20atmosphere&width=400&height=240&seq=trading-5&orientation=landscape',
-          approved: true
-        },
-        {
-          id: 6,
-          title: 'メーカー技術職セミナー',
-          company: '日本製造株式会社',
-          year: '2026',
-          jobType: '製造・技術',
-          mode: 'ハイブリッド',
-          place: '本社工場 + オンライン',
-          dateStart: '2024-03-10',
-          dateEnd: '2024-03-11',
-          tags: ['製造', '技術', 'ものづくり'],
-          desc: '日本のものづくりを支える技術職の魅力をお伝えします。工場見学や実際の製品開発プロセスを体験できます。理系学生におすすめのイベントです。',
-          applyUrl: 'https://example.com/apply/6',
-          image: 'https://readdy.ai/api/search-image?query=modern%20manufacturing%20facility%20with%20young%20engineers%2C%20high-tech%20production%20line%20with%20safety%20equipment%2C%20students%20observing%20manufacturing%20processes%2C%20clean%20industrial%20environment%20with%20bright%20lighting&width=400&height=240&seq=manufacturing-6&orientation=landscape',
-          approved: true
-        }
-      ];
-      setJobs(sampleJobs);
-    }
-  }, [jobs.length, setJobs]);
-  
-  // 初回ポップアップ表示
-  useEffect(() => {
-    if (!firstPopupDismissed) {
-      setShowFirstPopup(true);
-    }
-  }, [firstPopupDismissed]);
+    if (didInit.current) return;
+    didInit.current = true;
 
-  // プロフィールフォーム初期化
-  useEffect(() => {
-    if (currentUserEmail && showProfileModal) {
-      const user = profiles.find(p => p.email === currentUserEmail);
-      if (user) {
-        setProfileForm({
-          name: user.name,
-          university: user.university
-        });
-      }
+    // 端末IDを確定（未発行なら発行）
+    getDeviceId();
+
+    // 起動時トークン検証 → 端末一致しない/トークンなしならログアウト状態に戻す
+    const restored = restoreLogin();
+    if (restored) {
+      setCurrentUserEmail(restored);
+    } else {
+      setCurrentUserEmail('');
     }
+
+    (async () => {
+      try {
+        const res = await fetch(cb(SUBMISSIONS_CSV_URL), { cache: 'no-store' });
+        const txt = await res.text();
+        const next = mapRowsToJobs(parseCsvToObjects(txt));
+        if (!deepEqual(next, jobs)) setJobs(next);
+      } catch {}
+      try {
+        const res = await fetch(cb(PROFILES_CSV_URL), { cache: 'no-store' });
+        const txt = await res.text();
+        const next = mapRowsToProfiles(parseCsvToObjects(txt));
+        if (!deepEqual(next, profiles)) setProfiles(next);
+      } catch {}
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // プロフィール編集モーダルを開いた時だけフォームに反映（安定化）
+  useEffect(() => {
+    if (!currentUserEmail || !showProfileModal) return;
+    const emailKey = normEmail(currentUserEmail);
+    const u = profiles.find(p => (p.emailKey ?? normEmail(p.email)) === emailKey);
+    if (u) setProfileForm({ name: u.name, university: u.university });
   }, [currentUserEmail, showProfileModal, profiles]);
-  
-  // フィルタリング
-  const filteredJobs = jobs.filter(job => {
-    if (!job.approved) return false;
-    if (activeYear !== 'すべて' && job.year !== activeYear) return false;
-    if (searchFilters.favOnly && !favIds.includes(job.id)) return false;
-    if (searchFilters.q && !job.title.toLowerCase().includes(searchFilters.q.toLowerCase()) && 
-        !job.company.toLowerCase().includes(searchFilters.q.toLowerCase())) return false;
-    if (searchFilters.jobType && job.jobType !== searchFilters.jobType) return false;
-    if (searchFilters.mode && job.mode !== searchFilters.mode) return false;
-    
-    // 期間フィルタ（1日でも重なればヒット）
-    if (searchFilters.startDate && searchFilters.endDate) {
-      const filterStart = new Date(searchFilters.startDate);
-      const filterEnd = new Date(searchFilters.endDate);
-      const jobStart = new Date(job.dateStart);
-      const jobEnd = new Date(job.dateEnd);
-      
-      if (jobEnd < filterStart || jobStart > filterEnd) return false;
-    }
-    
-    return true;
-  });
-  
+
+  /* ---------- 絞り込み ---------- */
+  const filteredJobs = useMemo(() => {
+    return jobs.filter(job => {
+      if (!job.approved) return false;
+      if (activeYear !== 'すべて' && job.year !== activeYear) return false;
+      if (searchFilters.favOnly && !favIds.includes(job.id)) return false;
+      if (searchFilters.q) {
+        const q = searchFilters.q.toLowerCase();
+        if (!(`${job.title} ${job.company} ${job.desc}`.toLowerCase().includes(q))) return false;
+      }
+      if (searchFilters.jobType && job.jobType !== searchFilters.jobType) return false;
+      if (searchFilters.mode && job.mode !== searchFilters.mode) return false;
+      if (searchFilters.startDate && searchFilters.endDate) {
+        const fs = new Date(searchFilters.startDate);
+        const fe = new Date(searchFilters.endDate);
+        const js = new Date(job.dateStart);
+        const je = new Date(job.dateEnd);
+        if (je < fs || js > fe) return false;
+      }
+      return true;
+    });
+  }, [jobs, favIds, searchFilters, activeYear]);
+
+  /* ---------- 動作 ---------- */
   const handleFavoriteToggle = (id: number) => {
-    setFavIds(prev => 
-      prev.includes(id) 
-        ? prev.filter(fid => fid !== id)
-        : [...prev, id]
-    );
+    setFavIds(prev => (prev.includes(id) ? prev.filter(fid => fid !== id) : [...prev, id]));
   };
-  
+
   const handleJobClick = (job: Job) => {
     setSelectedJob(job);
-    setShowJobModal(true);
+    setShowJobOverlay(true); // 自前オーバーレイを確実に開く
   };
-  
+
   const handleLogin = () => {
-    const profile = profiles.find(p => p.email === loginForm.email && p.password === loginForm.password);
-    if (profile) {
-      setCurrentUserEmail(loginForm.email);
+    const key = normEmail(loginForm.email);
+    const pass = normText(loginForm.password);
+    if (!key || !pass) return alert('メールとパスワードは必須です');
+    const u = profiles.find(p => (p.emailKey ?? normEmail(p.email)) === key && p.password === pass);
+    if (u) {
+      // トークンを発行し、rememberMe に応じて保存先を切替
+      finalizeLogin(u.email, rememberMe);
+      setCurrentUserEmail(u.email);
       setShowLoginModal(false);
       setLoginForm({ email: '', password: '' });
+      alert('ログインしました');
     } else {
       alert('メールアドレスまたはパスワードが間違っています');
     }
   };
-  
-  const handleRegister = () => {
-    const newProfile: Profile = {
-      ...registerForm,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+
+  /** 新規登録 → GAS robust + ローカル upsert + 遅延確認 + トークン発行 */
+  const handleRegister = async () => {
+    const emailInput = registerForm.email;
+    const emailKey = normEmail(emailInput);
+    const now = new Date().toISOString();
+
+    const newProf: Profile = {
+      email: emailInput.trim(),
+      name: normText(registerForm.name),
+      university: normText(registerForm.university),
+      password: registerForm.password || '',
+      createdAt: now,
+      updatedAt: now,
+      emailKey
     };
-    
-    const existingIndex = profiles.findIndex(p => p.email === registerForm.email);
-    if (existingIndex >= 0) {
-      const updatedProfiles = [...profiles];
-      updatedProfiles[existingIndex] = { ...newProfile, createdAt: profiles[existingIndex].createdAt };
-      setProfiles(updatedProfiles);
-    } else {
-      setProfiles([...profiles, newProfile]);
-    }
-    
-    setCurrentUserEmail(registerForm.email);
+    if (!emailKey || !newProf.password) return alert('メールとパスワードは必須です');
+    if (!emailValid(emailKey)) return alert('メールアドレスの形式が正しくありません');
+
+    // 楽観反映
+    setProfiles(prev => {
+      const i = prev.findIndex(p => (p.emailKey ?? normEmail(p.email)) === emailKey);
+      if (i >= 0) {
+        const cp = [...prev];
+        cp[i] = { ...cp[i], ...newProf, createdAt: cp[i].createdAt || now };
+        return cp;
+      }
+      return [...prev, newProf];
+    });
+
+    // ログイントークンを発行（新規登録後は即ログイン）
+    finalizeLogin(newProf.email, true /* 初回は端末保持ONにしてもOK。好みで false にしてもよい */);
+    setCurrentUserEmail(newProf.email);
+
     setShowRegisterModal(false);
     setRegisterForm({ email: '', password: '', name: '', university: '' });
-  };
-  
-  const handleParticipate = (job: Job) => {
-    if (!currentUserEmail) {
-      setShowLoginModal(true);
-      return;
-    }
-    
-    // 参加記録を追加（実装は簡略化）
-    alert(`${job.title}に参加申込みしました！`);
-    window.open(job.applyUrl, '_blank');
-  };
-  
-  const dismissFirstPopup = () => {
-    setFirstPopupDismissed('1');
-    setShowFirstPopup(false);
+    alert('登録を送信しました（数秒後に同期を確認します）');
+
+    // 送信
+    await writeProfileRobust(WRITE_BASE, { ...newProf, email: emailKey });
+
+    // 遅延確認
+    setTimeout(async () => {
+      try {
+        const res = await fetch(cb(PROFILES_CSV_URL), { cache: 'no-store' });
+        const txt = await res.text();
+        const next = mapRowsToProfiles(parseCsvToObjects(txt));
+        startTransition(() => { if (!deepEqual(next, profiles)) setProfiles(next); });
+      } catch {}
+    }, 1800);
   };
 
-  const handleHomeClick = () => {
-    setShowDrawer(false);
-    setActiveYear('すべて');
-    setSearchFilters({
-      q: '',
-      jobType: '',
-      mode: '',
-      startDate: '',
-      endDate: '',
-      onlyOpen: false,
-      favOnly: false,
-      activeYear: 'すべて'
-    });
-  };
-
-  const handleAdminSubmit = () => {
-    const newJob: Job = {
-      id: Date.now(),
-      title: adminForm.title,
-      company: adminForm.company,
-      year: adminForm.year,
-      jobType: adminForm.jobType,
-      mode: adminForm.mode,
-      place: adminForm.place,
-      dateStart: adminForm.dateStart,
-      dateEnd: adminForm.dateEnd,
-      tags: adminForm.tags.split(',').map(tag => tag.trim()).filter(tag => tag),
-      desc: adminForm.desc,
-      applyUrl: adminForm.applyUrl,
-      image: '',
-      approved: false
-    };
-
-    setJobs(prev => [...prev, newJob]);
-    setAdminForm({
-      title: '',
-      company: '',
-      year: '2026',
-      jobType: 'セミナー',
-      mode: 'オンライン',
-      place: '',
-      dateStart: '',
-      dateEnd: '',
-      tags: '',
-      desc: '',
-      applyUrl: ''
-    });
-    alert('投稿しました。承認をお待ちください。');
-  };
-
-  const handleApproveJob = (jobId: number) => {
-    setJobs(prev => prev.map(job => 
-      job.id === jobId ? { ...job, approved: true } : job
-    ));
-    alert('承認しました');
-  };
-
-  const handleRejectJob = (jobId: number) => {
-    setJobs(prev => prev.filter(job => job.id !== jobId));
-    alert('却下しました');
-  };
-
-  const handleProfileUpdate = () => {
+  /** プロフィール更新 → GAS robust + ローカル upsert + 遅延確認（トークンは維持） */
+  const handleProfileUpdate = async () => {
     if (!currentUserEmail) return;
-    
-    const updatedProfile: Profile = {
-      email: currentUserEmail,
-      name: profileForm.name,
-      university: profileForm.university,
-      password: profiles.find(p => p.email === currentUserEmail)?.password || '',
-      createdAt: profiles.find(p => p.email === currentUserEmail)?.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+    const key = normEmail(currentUserEmail);
+    const old = profiles.find(p => (p.emailKey ?? normEmail(p.email)) === key);
+    const now = new Date().toISOString();
+    const next: Profile = {
+      email: old?.email || currentUserEmail,
+      name: normText(profileForm.name),
+      university: normText(profileForm.university),
+      password: old?.password || '',
+      createdAt: old?.createdAt || now,
+      updatedAt: now,
+      emailKey: key
     };
 
-    const existingIndex = profiles.findIndex(p => p.email === currentUserEmail);
-    if (existingIndex >= 0) {
-      const updatedProfiles = [...profiles];
-      updatedProfiles[existingIndex] = updatedProfile;
-      setProfiles(updatedProfiles);
-    } else {
-      setProfiles([...profiles, updatedProfile]);
-    }
+    setProfiles(prev => {
+      const i = prev.findIndex(p => (p.emailKey ?? normEmail(p.email)) === key);
+      if (i >= 0) { const cp = [...prev]; cp[i] = next; return cp; }
+      return [...prev, next];
+    });
+    alert('更新を送信しました（数秒後に同期を確認します）');
 
-    alert('プロフィールを更新しました');
+    await writeProfileRobust(WRITE_BASE, { ...next, email: key });
+
+    setTimeout(async () => {
+      try {
+        const res = await fetch(cb(PROFILES_CSV_URL), { cache: 'no-store' });
+        const txt = await res.text();
+        const newer = mapRowsToProfiles(parseCsvToObjects(txt));
+        startTransition(() => { if (!deepEqual(newer, profiles)) setProfiles(newer); });
+      } catch {}
+    }, 1500);
+
     setShowProfileModal(false);
   };
 
-  const handleContactSubmit = () => {
-    // お問い合わせデータを保存（実装は簡略化）
-    alert('お問い合わせを送信しました');
-    setContactForm({
-      company: '',
-      person: '',
-      tel: '',
-      email: '',
-      body: ''
-    });
-    setShowContactModal(false);
+  const handleParticipate = (job: Job) => {
+    if (!currentUserEmail) { setShowLoginModal(true); return; }
+    alert(`${job.title}に参加申込みしました！`);
+    window.open(job.applyUrl, '_blank');
   };
 
   const handleLogout = () => {
+    hardLogout();
     setCurrentUserEmail('');
     setShowDrawer(false);
     alert('ログアウトしました');
   };
 
-  const pendingJobs = jobs.filter(job => !job.approved);
-  
+  const handleHomeClick = () => {
+    setShowDrawer(false);
+    setActiveYear('すべて');
+    setSearchFilters({ q:'', jobType:'', mode:'', startDate:'', endDate:'', onlyOpen:false, favOnly:false, activeYear:'すべて' });
+  };
+
+  /* ---------- UI ---------- */
   return (
     <div className="min-h-screen bg-gradient-to-br from-orange-50/30 via-white to-orange-50/20">
       {/* 背景装飾 */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-20 right-10 w-32 h-32 bg-gradient-to-br from-orange-100/40 to-orange-200/20 rounded-full blur-xl"></div>
-        <div className="absolute top-60 left-10 w-24 h-24 bg-gradient-to-br from-orange-200/30 to-orange-100/20 rounded-full blur-lg"></div>
-        <div className="absolute bottom-40 right-20 w-40 h-40 bg-gradient-to-br from-orange-50/50 to-orange-100/30 rounded-full blur-2xl"></div>
-        <div className="absolute top-1/3 right-1/4 w-16 h-16 bg-gradient-to-br from-orange-200/20 to-orange-300/10 rounded-full blur-lg"></div>
-        <div className="absolute bottom-1/4 left-1/3 w-20 h-20 bg-gradient-to-br from-orange-100/30 to-orange-200/20 rounded-full blur-xl"></div>
+        <div className="absolute top-20 right-10 w-32 h-32 bg-gradient-to-br from-orange-100/40 to-orange-200/20 rounded-full blur-xl" />
+        <div className="absolute top-60 left-10 w-24 h-24 bg-gradient-to-br from-orange-200/30 to-orange-100/20 rounded-full blur-lg" />
+        <div className="absolute bottom-40 right-20 w-40 h-40 bg-gradient-to-br from-orange-50/50 to-orange-100/30 rounded-full blur-2xl" />
+        <div className="absolute top-1/3 right-1/4 w-16 h-16 bg-gradient-to-br from-orange-200/20 to-orange-300/10 rounded-full blur-lg" />
+        <div className="absolute bottom-1/4 left-1/3 w-20 h-20 bg-gradient-to-br from-orange-100/30 to-orange-200/20 rounded-full blur-xl" />
       </div>
 
       <Header
@@ -451,27 +555,22 @@ export default function Home() {
         onMenuClick={() => setShowDrawer(true)}
         currentUser={currentUserEmail || null}
       />
-      
+
       <Hero />
-      
       <SearchLauncher onClick={() => setShowSearchModal(true)} />
-      
-      {/* 件数表示 */}
+
+      {/* 件数 */}
       <div className="flex justify-center px-4 mb-4">
         <div className="w-full max-w-[min(88vw,520px)] md:max-w-[min(70vw,560px)] lg:max-w-[min(42vw,600px)]">
           <div className="flex items-center justify-between">
-            <p className="text-gray-600 text-sm">
-              {filteredJobs.length}件のイベントが見つかりました
-            </p>
+            <p className="text-gray-600 text-sm">{filteredJobs.length}件のイベントが見つかりました</p>
             {activeYear !== 'すべて' && (
-              <span className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded-full font-medium">
-                {activeYear}卒対象
-              </span>
+              <span className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded-full font-medium">{activeYear}卒対象</span>
             )}
           </div>
         </div>
       </div>
-      
+
       {/* 求人リスト */}
       <div className="flex justify-center px-4 pb-8">
         <div className="w-full max-w-[min(88vw,520px)] md:max-w-[min(70vw,560px)] lg:max-w-[min(42vw,600px)] space-y-4">
@@ -484,11 +583,10 @@ export default function Home() {
               onCardClick={handleJobClick}
             />
           ))}
-          
           {filteredJobs.length === 0 && (
             <div className="text-center py-12">
               <div className="w-20 h-20 bg-gradient-to-br from-orange-100 to-orange-200 rounded-full flex items-center justify-center mx-auto mb-4">
-                <i className="ri-search-line text-3xl text-orange-400"></i>
+                <i className="ri-search-line text-3xl text-orange-400" />
               </div>
               <p className="text-gray-600 font-medium mb-2">条件に合うイベントが見つかりませんでした</p>
               <p className="text-gray-500 text-sm">検索条件を変更してお試しください</p>
@@ -496,18 +594,12 @@ export default function Home() {
           )}
         </div>
       </div>
-      
+
       <Footer />
-      
-      {/* ... existing modals ... */}
-      
-      {/* 検索モーダル */}
-      <Modal
-        isOpen={showSearchModal}
-        onClose={() => setShowSearchModal(false)}
-        title="条件でさがす"
-        size="lg"
-      >
+
+      {/* ====== 既存モーダル群 ====== */}
+      {/* 検索 */}
+      <Modal isOpen={showSearchModal} onClose={() => setShowSearchModal(false)} title="条件でさがす" size="lg">
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">キーワード</label>
@@ -517,7 +609,6 @@ export default function Home() {
               onChange={(e) => setSearchFilters(prev => ({ ...prev, q: e.target.value }))}
             />
           </div>
-          
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">職種</label>
@@ -537,7 +628,6 @@ export default function Home() {
                 <option value="製造・技術">製造・技術</option>
               </select>
             </div>
-            
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">開催形式</label>
               <select
@@ -552,27 +642,16 @@ export default function Home() {
               </select>
             </div>
           </div>
-          
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">開始日</label>
-              <Input
-                type="date"
-                value={searchFilters.startDate}
-                onChange={(e) => setSearchFilters(prev => ({ ...prev, startDate: e.target.value }))}
-              />
+              <Input type="date" value={searchFilters.startDate} onChange={(e) => setSearchFilters(prev => ({ ...prev, startDate: e.target.value }))} />
             </div>
-            
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">終了日</label>
-              <Input
-                type="date"
-                value={searchFilters.endDate}
-                onChange={(e) => setSearchFilters(prev => ({ ...prev, endDate: e.target.value }))}
-              />
+              <Input type="date" value={searchFilters.endDate} onChange={(e) => setSearchFilters(prev => ({ ...prev, endDate: e.target.value }))} />
             </div>
           </div>
-          
           <div className="flex items-center space-x-4">
             <label className="flex items-center">
               <input
@@ -584,42 +663,21 @@ export default function Home() {
               お気に入りのみ
             </label>
           </div>
-          
           <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-3 pt-4">
             <Button
               variant="outline"
-              onClick={() => {
-                setSearchFilters({
-                  q: '',
-                  jobType: '',
-                  mode: '',
-                  startDate: '',
-                  endDate: '',
-                  onlyOpen: false,
-                  favOnly: false,
-                  activeYear: 'すべて'
-                });
-              }}
+              onClick={() => setSearchFilters({ q:'', jobType:'', mode:'', startDate:'', endDate:'', onlyOpen:false, favOnly:false, activeYear:'すべて' })}
               className="flex-1"
             >
               リセット
             </Button>
-            <Button
-              onClick={() => setShowSearchModal(false)}
-              className="flex-1"
-            >
-              検索
-            </Button>
+            <Button onClick={() => setShowSearchModal(false)} className="flex-1">検索</Button>
           </div>
         </div>
       </Modal>
-      
-      {/* ログインモーダル */}
-      <Modal
-        isOpen={showLoginModal}
-        onClose={() => setShowLoginModal(false)}
-        title="ログイン"
-      >
+
+      {/* ログイン */}
+      <Modal isOpen={showLoginModal} onClose={() => setShowLoginModal(false)} title="ログイン">
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">メールアドレス</label>
@@ -630,7 +688,6 @@ export default function Home() {
               onChange={(e) => setLoginForm(prev => ({ ...prev, email: e.target.value }))}
             />
           </div>
-          
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">パスワード</label>
             <Input
@@ -640,19 +697,24 @@ export default function Home() {
               onChange={(e) => setLoginForm(prev => ({ ...prev, password: e.target.value }))}
             />
           </div>
-          
-          <Button onClick={handleLogin} className="w-full">
-            ログイン
-          </Button>
+
+          {/* 端末保持チェック */}
+          <label className="flex items-center text-sm text-gray-700">
+            <input
+              type="checkbox"
+              checked={rememberMe}
+              onChange={(e) => setRememberMe(e.target.checked)}
+              className="mr-2"
+            />
+            この端末でログイン状態を保持
+          </label>
+
+          <Button onClick={handleLogin} className="w-full">ログイン</Button>
         </div>
       </Modal>
-      
-      {/* 新規登録モーダル */}
-      <Modal
-        isOpen={showRegisterModal}
-        onClose={() => setShowRegisterModal(false)}
-        title="新規登録"
-      >
+
+      {/* 新規登録 */}
+      <Modal isOpen={showRegisterModal} onClose={() => setShowRegisterModal(false)} title="新規登録">
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">氏名</label>
@@ -662,7 +724,6 @@ export default function Home() {
               onChange={(e) => setRegisterForm(prev => ({ ...prev, name: e.target.value }))}
             />
           </div>
-          
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">大学名</label>
             <Input
@@ -671,7 +732,6 @@ export default function Home() {
               onChange={(e) => setRegisterForm(prev => ({ ...prev, university: e.target.value }))}
             />
           </div>
-          
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">メールアドレス</label>
             <Input
@@ -681,7 +741,6 @@ export default function Home() {
               onChange={(e) => setRegisterForm(prev => ({ ...prev, email: e.target.value }))}
             />
           </div>
-          
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">パスワード</label>
             <Input
@@ -691,190 +750,12 @@ export default function Home() {
               onChange={(e) => setRegisterForm(prev => ({ ...prev, password: e.target.value }))}
             />
           </div>
-          
-          <Button onClick={handleRegister} className="w-full">
-            登録
-          </Button>
+          <Button onClick={handleRegister} className="w-full">登録</Button>
         </div>
       </Modal>
 
-      {/* 管理モーダル */}
-      <Modal
-        isOpen={showAdminModal}
-        onClose={() => setShowAdminModal(false)}
-        title="管理（承認）"
-        size="xl"
-      >
-        <div className="space-y-6">
-          {/* 新規投稿フォーム */}
-          <div>
-            <h3 className="text-lg font-semibold mb-4">新規投稿</h3>
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">タイトル</label>
-                  <Input
-                    placeholder="イベントタイトル"
-                    value={adminForm.title}
-                    onChange={(e) => setAdminForm(prev => ({ ...prev, title: e.target.value }))}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">企業名</label>
-                  <Input
-                    placeholder="株式会社○○"
-                    value={adminForm.company}
-                    onChange={(e) => setAdminForm(prev => ({ ...prev, company: e.target.value }))}
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">対象年度</label>
-                  <select
-                    value={adminForm.year}
-                    onChange={(e) => setAdminForm(prev => ({ ...prev, year: e.target.value }))}
-                    className="w-full px-4 py-3 text-base border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#ff7a00] focus:border-transparent outline-none pr-8"
-                  >
-                    <option value="2026">2026年卒</option>
-                    <option value="2027">2027年卒</option>
-                    <option value="2028">2028年卒</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">職種</label>
-                  <select
-                    value={adminForm.jobType}
-                    onChange={(e) => setAdminForm(prev => ({ ...prev, jobType: e.target.value }))}
-                    className="w-full px-4 py-3 text-base border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#ff7a00] focus:border-transparent outline-none pr-8"
-                  >
-                    <option value="セミナー">セミナー</option>
-                    <option value="インターン">インターン</option>
-                    <option value="座談会">座談会</option>
-                    <option value="説明会">説明会</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">開催形式</label>
-                  <select
-                    value={adminForm.mode}
-                    onChange={(e) => setAdminForm(prev => ({ ...prev, mode: e.target.value }))}
-                    className="w-full px-4 py-3 text-base border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#ff7a00] focus:border-transparent outline-none pr-8"
-                  >
-                    <option value="オンライン">オンライン</option>
-                    <option value="対面">対面</option>
-                    <option value="ハイブリッド">ハイブリッド</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">場所</label>
-                <Input
-                  placeholder="開催場所"
-                  value={adminForm.place}
-                  onChange={(e) => setAdminForm(prev => ({ ...prev, place: e.target.value }))}
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">開始日</label>
-                  <Input
-                    type="date"
-                    value={adminForm.dateStart}
-                    onChange={(e) => setAdminForm(prev => ({ ...prev, dateStart: e.target.value }))}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">終了日</label>
-                  <Input
-                    type="date"
-                    value={adminForm.dateEnd}
-                    onChange={(e) => setAdminForm(prev => ({ ...prev, dateEnd: e.target.value }))}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">タグ（カンマ区切り）</label>
-                <Input
-                  placeholder="例: IT,エンジニア,初心者歓迎"
-                  value={adminForm.tags}
-                  onChange={(e) => setAdminForm(prev => ({ ...prev, tags: e.target.value }))}
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">詳細説明</label>
-                <textarea
-                  className="w-full px-4 py-3 text-base border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#ff7a00] focus:border-transparent outline-none resize-none"
-                  rows={4}
-                  placeholder="イベントの詳細説明"
-                  value={adminForm.desc}
-                  onChange={(e) => setAdminForm(prev => ({ ...prev, desc: e.target.value }))}
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">応募URL</label>
-                <Input
-                  type="url"
-                  placeholder="https://example.com/apply"
-                  value={adminForm.applyUrl}
-                  onChange={(e) => setAdminForm(prev => ({ ...prev, applyUrl: e.target.value }))}
-                />
-              </div>
-
-              <Button onClick={handleAdminSubmit} className="w-full">
-                投稿
-              </Button>
-            </div>
-          </div>
-
-          {/* 承認待ち */}
-          <div className="border-t pt-6">
-            <h3 className="text-lg font-semibold mb-4">承認待ち ({pendingJobs.length}件)</h3>
-            {pendingJobs.length === 0 ? (
-              <p className="text-gray-500">承認待ちの投稿はありません</p>
-            ) : (
-              <div className="space-y-4 max-h-60 overflow-y-auto">
-                {pendingJobs.map(job => (
-                  <div key={job.id} className="p-4 border border-gray-200 rounded-lg">
-                    <h4 className="font-medium text-gray-900 mb-2">{job.title}</h4>
-                    <p className="text-sm text-gray-600 mb-3">
-                      {job.company} - {job.year}年卒 - {job.jobType}
-                    </p>
-                    <div className="flex space-x-2">
-                      <Button
-                        size="sm"
-                        onClick={() => handleApproveJob(job.id)}
-                      >
-                        承認
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleRejectJob(job.id)}
-                      >
-                        却下
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </Modal>
-
-      {/* プロフィールモーダル */}
-      <Modal
-        isOpen={showProfileModal}
-        onClose={() => setShowProfileModal(false)}
-        title="プロフィール"
-      >
+      {/* プロフィール */}
+      <Modal isOpen={showProfileModal} onClose={() => setShowProfileModal(false)} title="プロフィール">
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">氏名</label>
@@ -884,7 +765,6 @@ export default function Home() {
               onChange={(e) => setProfileForm(prev => ({ ...prev, name: e.target.value }))}
             />
           </div>
-          
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">大学名</label>
             <Input
@@ -893,35 +773,19 @@ export default function Home() {
               onChange={(e) => setProfileForm(prev => ({ ...prev, university: e.target.value }))}
             />
           </div>
-          
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">メールアドレス</label>
-            <Input
-              type="email"
-              value={currentUserEmail}
-              disabled
-              className="bg-gray-50"
-            />
+            <label className="block text sm font-medium text-gray-700 mb-2">メールアドレス</label>
+            <Input type="email" value={currentUserEmail} disabled className="bg-gray-50" />
           </div>
-          
           <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-3 pt-4">
-            <Button onClick={handleProfileUpdate} className="flex-1">
-              更新
-            </Button>
-            <Button variant="outline" onClick={handleLogout} className="flex-1">
-              ログアウト
-            </Button>
+            <Button onClick={handleProfileUpdate} className="flex-1">更新</Button>
+            <Button variant="outline" onClick={handleLogout} className="flex-1">ログアウト</Button>
           </div>
         </div>
       </Modal>
 
-      {/* お問い合わせモーダル */}
-      <Modal
-        isOpen={showContactModal}
-        onClose={() => setShowContactModal(false)}
-        title="資料請求・お問い合わせ"
-        size="lg"
-      >
+      {/* 資料請求・お問い合わせ（復活） */}
+      <Modal isOpen={showContactModal} onClose={() => setShowContactModal(false)} title="資料請求・お問い合わせ" size="lg">
         <div className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
@@ -941,7 +805,6 @@ export default function Home() {
               />
             </div>
           </div>
-
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">電話番号</label>
@@ -962,7 +825,6 @@ export default function Home() {
               />
             </div>
           </div>
-
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">お問い合わせ内容</label>
             <textarea
@@ -973,150 +835,142 @@ export default function Home() {
               onChange={(e) => setContactForm(prev => ({ ...prev, body: e.target.value }))}
               maxLength={500}
             />
-            <div className="text-right text-sm text-gray-500 mt-1">
-              {contactForm.body.length}/500文字
-            </div>
+            <div className="text-right text-sm text-gray-500 mt-1">{contactForm.body.length}/500文字</div>
           </div>
-
-          <Button onClick={handleContactSubmit} className="w-full">
-            送信
-          </Button>
+          <Button onClick={() => { alert('送信しました'); setShowContactModal(false); }} className="w-full">送信</Button>
         </div>
       </Modal>
-      
-      {/* 求人詳細モーダル */}
-      <Modal
-        isOpen={showJobModal}
-        onClose={() => setShowJobModal(false)}
-        size="xl"
-        className="is-job-detail"
-      >
-        {selectedJob && (
-          <div>
-            {/* 画像 */}
+
+      {/* 会社・規約モーダル */}
+      <Modal isOpen={showTermsModal} onClose={() => setShowTermsModal(false)} title="利用規約" size="lg">
+        <div className="space-y-4 leading-7 max-h-[70vh] overflow-auto">
+          <h3 className="font-semibold">第1条（適用）</h3>
+          <p>本規約は、当サービスの利用条件を定めるものです。</p>
+          <h3 className="font-semibold">第2条（利用登録）</h3>
+          <p>利用希望者は、本規約に同意のうえ申請します。</p>
+          <h3 className="font-semibold">第3条（禁止事項）</h3>
+          <ul className="list-disc pl-6">
+            <li>法令または公序良俗に違反する行為</li>
+            <li>犯罪行為に関連する行為</li>
+            <li>運営を妨害する行為</li>
+          </ul>
+          <h3 className="font-semibold">第4条（免責）</h3>
+          <p>当サービスは利用により生じた損害について責任を負いません。</p>
+        </div>
+      </Modal>
+
+      <Modal isOpen={showPrivacyModal} onClose={() => setShowPrivacyModal(false)} title="プライバシーポリシー" size="lg">
+        <div className="space-y-4 leading-7 max-h-[70vh] overflow-auto">
+          <h3 className="font-semibold">個人情報の収集</h3>
+          <p>サービス提供のために必要な範囲で収集します。</p>
+          <h3 className="font-semibold">利用目的</h3>
+          <ul className="list-disc pl-6">
+            <li>サービスの提供・運営</li>
+            <li>お問い合わせ対応</li>
+            <li>サービス改善・開発</li>
+          </ul>
+          <h3 className="font-semibold">第三者提供</h3>
+          <p>法令に基づく場合を除き、同意なく第三者に提供しません。</p>
+          <h3 className="font-semibold">安全管理</h3>
+          <p>適切な安全管理措置を講じます。</p>
+        </div>
+      </Modal>
+
+      <Modal isOpen={showCompanyModal} onClose={() => setShowCompanyModal(false)} title="会社情報">
+        <div className="space-y-4 leading-7">
+          <h3 className="font-semibold">マジツナグ</h3>
+          <table className="w-full border-collapse">
+            <tbody>
+              <tr className="border-b"><td className="py-2 font-medium w-32">団体名</td><td className="py-2">学生団体マジツナグ</td></tr>
+              <tr className="border-b"><td className="py-2 font-medium">代表者</td><td className="py-2">大泉颯冬</td></tr>
+              <tr className="border-b"><td className="py-2 font-medium">設立</td><td className="py-2">2025年11月8日</td></tr>
+              <tr><td className="py-2 font-medium">お問い合わせ</td><td className="py-2">majitsunagu279@gmail.com</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </Modal>
+
+      {/* ====== 求人詳細（自前オーバーレイ） ====== */}
+      {showJobOverlay && selectedJob && (
+        <div className="fixed inset-0 z-[60]">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setShowJobOverlay(false)} />
+          <div
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(92vw,720px)] max-h-[85vh] overflow-y-auto bg-white rounded-2xl shadow-2xl p-6"
+            role="dialog" aria-modal="true"
+          >
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-medium text-[#ff7a00] bg-[#ff7a00]/10 px-3 py-1 rounded-full">
+                {selectedJob.year}卒対象
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleFavoriteToggle(selectedJob.id)}
+                  className="w-10 h-10 flex items-center justify-center bg-gray-100 hover:bg-gray-200 rounded-full transition-all duration-200 cursor-pointer"
+                  aria-label="お気に入り"
+                >
+                  <i className={`${favIds.includes(selectedJob.id) ? 'ri-heart-fill text-red-500' : 'ri-heart-line text-gray-600'} text-xl`}></i>
+                </button>
+                <button
+                  onClick={() => setShowJobOverlay(false)}
+                  className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-gray-700 rounded-full hover:bg-gray-100"
+                  aria-label="閉じる"
+                >
+                  <i className="ri-close-line text-2xl"></i>
+                </button>
+              </div>
+            </div>
+
             <div className="h-48 sm:h-64 bg-gray-300 rounded-lg mb-6 overflow-hidden">
               {selectedJob.image ? (
-                <img 
-                  src={selectedJob.image} 
-                  alt={selectedJob.title}
-                  className="w-full h-full object-cover object-top"
-                />
+                <img src={selectedJob.image} alt={selectedJob.title} className="w-full h-full object-cover object-top" />
               ) : (
                 <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-gray-100 to-gray-200">
                   <i className="ri-image-line text-6xl text-gray-400"></i>
                 </div>
               )}
             </div>
-            
-            {/* 詳細情報 */}
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-[#ff7a00] bg-[#ff7a00]/10 px-3 py-1 rounded-full">
-                  {selectedJob.year}卒対象
-                </span>
-                <button
-                  onClick={() => handleFavoriteToggle(selectedJob.id)}
-                  className="w-10 h-10 flex items-center justify-center bg-gray-100 hover:bg-gray-200 rounded-full transition-all duration-200 cursor-pointer"
-                >
-                  <i className={`${favIds.includes(selectedJob.id) ? 'ri-heart-fill text-red-500' : 'ri-heart-line text-gray-600'} text-xl`}></i>
-                </button>
-              </div>
-              
-              <h2 className="text-xl sm:text-2xl font-bold text-gray-900">{selectedJob.title}</h2>
-              <p className="text-lg text-gray-700">{selectedJob.company}</p>
-              
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 py-4 border-t border-b border-gray-200">
-                <div>
-                  <span className="text-sm text-gray-500">職種</span>
-                  <p className="font-medium">{selectedJob.jobType}</p>
-                </div>
-                <div>
-                  <span className="text-sm text-gray-500">開催形式</span>
-                  <p className="font-medium">{selectedJob.mode}</p>
-                </div>
-                <div>
-                  <span className="text-sm text-gray-500">場所</span>
-                  <p className="font-medium">{selectedJob.place}</p>
-                </div>
-                <div>
-                  <span className="text-sm text-gray-500">開催期間</span>
-                  <p className="font-medium">
-                    {new Date(selectedJob.dateStart).toLocaleDateString()} - {new Date(selectedJob.dateEnd).toLocaleDateString()}
-                  </p>
-                </div>
-              </div>
-              
+
+            <h2 className="text-xl sm:text-2xl font-bold text-gray-900">{selectedJob.title}</h2>
+            <p className="text-lg text-gray-700 mb-4">{selectedJob.company}</p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 py-4 border-t border-b border-gray-200">
+              <div><span className="text-sm text-gray-500">職種</span><p className="font-medium">{selectedJob.jobType}</p></div>
+              <div><span className="text-sm text-gray-500">開催形式</span><p className="font-medium">{selectedJob.mode}</p></div>
+              <div><span className="text-sm text-gray-500">場所</span><p className="font-medium">{selectedJob.place}</p></div>
               <div>
-                <h3 className="font-semibold text-gray-900 mb-2">詳細</h3>
-                <p className="text-gray-700 leading-relaxed">{selectedJob.desc}</p>
+                <span className="text-sm text-gray-500">開催期間</span>
+                <p className="font-medium">
+                  {new Date(selectedJob.dateStart).toLocaleDateString()} - {new Date(selectedJob.dateEnd).toLocaleDateString()}
+                </p>
               </div>
-              
-              <div className="flex flex-wrap gap-2">
-                {selectedJob.tags.map((tag, index) => (
-                  <span key={index} className="text-sm bg-gray-100 text-gray-700 px-3 py-1 rounded-full">
-                    {tag}
-                  </span>
-                ))}
-              </div>
-              
-              <Button
-                onClick={() => handleParticipate(selectedJob)}
-                className="w-full"
-                size="lg"
-              >
-                参加申込み
-              </Button>
             </div>
-          </div>
-        )}
-      </Modal>
-      
-      {/* 初回ポップアップ */}
-      <Modal
-        isOpen={showFirstPopup}
-        onClose={dismissFirstPopup}
-        title="マジつなぐへようこそ！"
-      >
-        <div className="text-center space-y-4">
-          <div className="h-32 bg-gradient-to-br from-orange-100 to-orange-200 rounded-lg flex items-center justify-center relative overflow-hidden">
-            <div className="absolute inset-0 bg-gradient-to-br from-orange-200/50 to-orange-300/30"></div>
-            <div className="relative">
-              <span className="text-4xl">🟧</span>
-              <div className="text-sm font-medium text-orange-800 mt-2">マジつなぐ</div>
+
+            <div className="mt-4">
+              <h3 className="font-semibold text-gray-900 mb-2">詳細</h3>
+              <p className="text-gray-700 leading-relaxed whitespace-pre-wrap">{selectedJob.desc}</p>
             </div>
+
+            <div className="flex flex-wrap gap-2 mt-4">
+              {selectedJob.tags.map((tag, i) => (
+                <span key={i} className="text-sm bg-gray-100 text-gray-700 px-3 py-1 rounded-full">{tag}</span>
+              ))}
+            </div>
+
+            <Button onClick={() => handleParticipate(selectedJob)} className="w-full mt-6" size="lg">参加申込み</Button>
           </div>
-          <p className="text-gray-700">
-            就活の不安を具体的な行動に変える、あなたの相談口です。
-          </p>
-          <Button
-            onClick={() => window.open('https://lin.ee/xxxxx', '_blank')}
-            className="w-full"
-          >
-            LINE友だち追加
-          </Button>
-          <Button
-            variant="outline"
-            onClick={dismissFirstPopup}
-            className="w-full"
-          >
-            後で
-          </Button>
         </div>
-      </Modal>
-      
-      {/* ドロワーメニュー */}
+      )}
+
+      {/* ===== ドロワー ===== */}
       {showDrawer && (
         <div className="fixed inset-0 z-50">
-          <div 
-            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-            onClick={() => setShowDrawer(false)}
-          />
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setShowDrawer(false)} />
           <div className="absolute right-0 top-0 h-full w-80 max-w-[85vw] bg-white shadow-2xl">
             <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-orange-50 to-white">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-3">
-                  <div className="w-8 h-8 bg-gradient-to-br from-orange-400 to-orange-500 rounded-lg flex items-center justify-center">
-                    <span className="text-white text-sm font-bold">🟧</span>
+                  <div className="w-8 h-8 rounded-lg overflow-hidden flex items-center justify-center bg-white">
+                    <img src="/assets/logo.png" alt="マジツナグ" className="h-8 w-auto object-contain" />
                   </div>
                   <h2 className="text-lg font-semibold text-gray-900">メニュー</h2>
                 </div>
@@ -1134,80 +988,40 @@ export default function Home() {
                 </div>
               )}
             </div>
-            
+
             <div className="p-6 space-y-2">
-              <button 
-                onClick={handleHomeClick}
+              <button onClick={handleHomeClick} className="w-full text-left p-3 hover:bg-orange-50 rounded-lg transition-all duration-200 cursor-pointer flex items-center">
+                <i className="ri-home-line mr-3 text-orange-500"></i><span className="font-medium">ホームへ</span>
+              </button>
+              <button
+                onClick={() => { setShowDrawer(false); if (!currentUserEmail) setShowLoginModal(true); else setShowProfileModal(true); }}
                 className="w-full text-left p-3 hover:bg-orange-50 rounded-lg transition-all duration-200 cursor-pointer flex items-center"
               >
-                <i className="ri-home-line mr-3 text-orange-500"></i>
-                <span className="font-medium">ホームへ</span>
+                <i className="ri-user-line mr-3 text-orange-500"></i><span className="font-medium">プロフィール</span>
               </button>
-              <button 
-                onClick={() => {
-                  setShowDrawer(false);
-                  if (!currentUserEmail) {
-                    setShowLoginModal(true);
-                  } else {
-                    setShowProfileModal(true);
-                  }
-                }}
-                className="w-full text-left p-3 hover:bg-orange-50 rounded-lg transition-all duration-200 cursor-pointer flex items-center"
-              >
-                <i className="ri-user-line mr-3 text-orange-500"></i>
-                <span className="font-medium">プロフィール</span>
+              <button onClick={() => { setShowDrawer(false); setShowContactModal(true); }} className="w-full text-left p-3 hover:bg-orange-50 rounded-lg transition-all duration-200 cursor-pointer">
+                <i className="ri-mail-line mr-3 text-orange-500"></i><span className="font-medium">資料請求・お問い合わせ</span>
               </button>
-              <button 
-                onClick={() => {
-                  setShowDrawer(false);
-                  setShowContactModal(true);
-                }}
-                className="w-full text-left p-3 hover:bg-orange-50 rounded-lg transition-all duration-200 cursor-pointer flex items-center"
-              >
-                <i className="ri-mail-line mr-3 text-orange-500"></i>
-                <span className="font-medium">資料請求・お問い合わせ</span>
-              </button>
-              <button 
-                onClick={() => {
-                  setShowDrawer(false);
-                  setShowAdminModal(true);
-                }}
-                className="w-full text-left p-3 hover:bg-orange-50 rounded-lg transition-all duration-200 cursor-pointer flex items-center"
-              >
-                <i className="ri-settings-line mr-3 text-orange-500"></i>
-                <span className="font-medium">管理（承認）</span>
-              </button>
-              
+
               <div className="border-t border-gray-200 pt-4 mt-4">
-                <button className="w-full text-left p-3 hover:bg-gray-50 rounded-lg transition-all duration-200 cursor-pointer flex items-center">
-                  <i className="ri-file-text-line mr-3 text-gray-500"></i>
-                  <span>利用規約</span>
+                <button onClick={() => { setShowDrawer(false); setShowTermsModal(true); }} className="w-full text-left p-3 hover:bg-gray-50 rounded-lg transition-all duration-200 cursor-pointer">
+                  <i className="ri-file-text-line mr-2 text-gray-500"></i><span>利用規約</span>
                 </button>
-                <button className="w-full text-left p-3 hover:bg-gray-50 rounded-lg transition-all duration-200 cursor-pointer flex items-center">
-                  <i className="ri-shield-line mr-3 text-gray-500"></i>
-                  <span>プライバシー</span>
+                <button onClick={() => { setShowDrawer(false); setShowPrivacyModal(true); }} className="w-full text-left p-3 hover:bg-gray-50 rounded-lg transition-all duration-200 cursor-pointer">
+                  <i className="ri-shield-line mr-2 text-gray-500"></i><span>プライバシー</span>
                 </button>
-                <button className="w-full text-left p-3 hover:bg-gray-50 rounded-lg transition-all duration-200 cursor-pointer flex items-center">
-                  <i className="ri-building-line mr-3 text-gray-500"></i>
-                  <span>会社情報</span>
+                <button onClick={() => { setShowDrawer(false); setShowCompanyModal(true); }} className="w-full text-left p-3 hover:bg-gray-50 rounded-lg transition-all duration-200 cursor-pointer">
+                  <i className="ri-building-line mr-2 text-gray-500"></i><span>団体情報</span>
                 </button>
-                <button 
-                  onClick={() => window.open('https://lin.ee/xxxxx', '_blank')}
-                  className="w-full text-left p-3 hover:bg-green-50 rounded-lg transition-all duration-200 cursor-pointer flex items-center"
-                >
-                  <i className="ri-chat-3-line mr-3 text-green-500"></i>
-                  <span>LINE友だち追加</span>
+                <button onClick={() => window.open(LINE_ADD_URL, '_blank')} className="w-full text-left p-3 hover:bg-green-50 rounded-lg transition-all duration-200 cursor-pointer">
+                  <i className="ri-chat-3-line mr-2 text-green-500"></i><span>LINE友だち追加</span>
                 </button>
               </div>
-              
+
               {currentUserEmail && (
                 <div className="border-t border-gray-200 pt-4 mt-4">
-                  <button 
-                    onClick={handleLogout}
-                    className="w-full text-left p-3 hover:bg-red-50 rounded-lg transition-all duration-200 text-red-600 cursor-pointer flex items-center"
-                  >
-                    <i className="ri-logout-box-line mr-3"></i>
-                    <span>ログアウト</span>
+                  <button onClick={handleLogout} className="w-full text左 p-3 hover:bg-red-50 rounded-lg transition-all duration-200 text-red-600 cursor-pointer">
+                    <i className="ri-logout-box-line mr-2"></i><span>ログアウト</span>
                   </button>
                 </div>
               )}

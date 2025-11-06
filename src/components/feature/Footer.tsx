@@ -8,20 +8,19 @@ export default function Footer() {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-8">
             {/* ロゴとサービス説明 */}
             <div className="md:col-span-2">
-              <div className="flex items-center space-x-3 mb-4">
-                <div className="w-10 h-10 bg-gradient-to-br from-orange-400 to-orange-500 rounded-lg flex items-center justify-center shadow-sm">
-                  <span className="text-white text-lg font-bold">🟧</span>
-                </div>
-                <h3 className="text-xl font-bold text-gray-900" style={{ fontFamily: '"Pacifico", serif' }}>
-                  マジつなぐ
-                </h3>
-              </div>
+              <img
+                src="/assets/logo.png"
+                alt="マジツナグ"
+                className="h-8 sm:h-10 w-auto object-contain drop-shadow-sm transition-transform duration-150 group-hover:scale-[1.02]"
+                loading="eager"
+                decoding="async"
+              />
               <p className="text-gray-600 text-sm leading-relaxed mb-4">
                 就活の不安を具体的な行動に変える、学生の相談口です。IT業界、金融業界、商社業界など様々な業界のセミナーやインターンシップ情報を提供し、学生と企業をつなぐプラットフォームです。
               </p>
               <div className="flex items-center space-x-4">
                 <a 
-                  href="https://lin.ee/xxxxx" 
+                  href="https://lin.ee/EV5Fni9" 
                   target="_blank" 
                   rel="noopener noreferrer"
                   className="inline-flex items-center px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-medium rounded-lg transition-colors duration-200 cursor-pointer whitespace-nowrap"
@@ -61,7 +60,7 @@ export default function Footer() {
           <div className="border-t border-gray-200 pt-6">
             <div className="flex flex-col sm:flex-row justify-between items-center space-y-4 sm:space-y-0">
               <div className="text-sm text-gray-500">
-                © 2024 マジつなぐ. All rights reserved.
+                © 2025 マジツナグ. All rights reserved.
               </div>
               <div className="flex items-center space-x-6">
                 <a 

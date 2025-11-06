@@ -1,3 +1,4 @@
+import { useNavigate } from 'react-router-dom';
 
 interface HeaderProps {
   activeYear: string;
@@ -9,36 +10,45 @@ interface HeaderProps {
   currentUser: string | null;
 }
 
-export default function Header({ 
-  activeYear, 
-  onYearChange, 
-  onSearchClick, 
-  onLoginClick, 
-  onRegisterClick, 
+export default function Header({
+  activeYear,
+  onYearChange,
+  onSearchClick,
+  onLoginClick,
+  onRegisterClick,
   onMenuClick,
-  currentUser 
+  currentUser,
 }: HeaderProps) {
   const years = ['すべて', '2026', '2027', '2028'];
+  const navigate = useNavigate();
+
+  // ← 重要: BASE_URL を先頭につける（dev: "/", 本番: "/majitunagu/" など）
+  const logoSrc = `${import.meta.env.BASE_URL}assets/logo.png`;
+
+  const goHome = (e: React.MouseEvent) => {
+    e.preventDefault();
+    navigate('/', { replace: false });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   return (
     <header className="bg-white/95 backdrop-blur-sm border-b border-gray-200 sticky top-0 z-40 shadow-sm">
       <div className="px-4 py-3">
         <div className="flex items-center justify-between">
-          {/* ロゴ */}
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-orange-400 to-orange-500 rounded-lg flex items-center justify-center shadow-sm">
-              <span className="text-white text-lg font-bold">🟧</span>
-            </div>
-            <div className="hidden sm:block">
-              <h1 className="text-xl font-bold text-gray-900" style={{ fontFamily: '"Pacifico", serif' }}>
-                マジつなぐ
-              </h1>
-            </div>
-          </div>
-          
+          {/* ロゴ（クリックでホーム） */}
+          <a href={`${import.meta.env.BASE_URL}`} onClick={goHome} className="flex items-center space-x-3 group cursor-pointer">
+            <img
+              src={logoSrc}
+              alt="マジツナグ"
+              className="h-30 sm:h-14 md:h-16 w-auto object-contain drop-shadow-sm transition-transform duration-150 group-hover:scale-[1.02]"
+              loading="eager"
+              decoding="async"
+            />
+          </a>
+
           {/* 卒年チップ（中央） */}
           <div className="hidden md:flex items-center space-x-2">
-            {years.map(year => (
+            {years.map((year) => (
               <button
                 key={year}
                 onClick={() => onYearChange(year)}
@@ -52,10 +62,10 @@ export default function Header({
               </button>
             ))}
           </div>
-          
+
           {/* モバイル用卒年チップ */}
           <div className="flex md:hidden items-center space-x-1">
-            {years.map(year => (
+            {years.map((year) => (
               <button
                 key={year}
                 onClick={() => onYearChange(year)}
@@ -65,14 +75,13 @@ export default function Header({
                     : 'bg-gray-100 text-gray-700 hover:bg-orange-100 hover:text-orange-700'
                 }`}
               >
-                {year === 'すべて' ? 'すべて' : `${year}`}
+                {year === 'すべて' ? 'すべて' : `${year}卒`}
               </button>
             ))}
           </div>
-          
+
           {/* 右側アクション */}
           <div className="flex items-center space-x-2">
-            {/* 検索ボタン */}
             <button
               onClick={onSearchClick}
               className="w-10 h-10 flex items-center justify-center bg-gray-100 hover:bg-orange-100 text-gray-600 hover:text-orange-600 rounded-full transition-all duration-200 cursor-pointer"
@@ -80,13 +89,10 @@ export default function Header({
             >
               <i className="ri-search-line text-lg"></i>
             </button>
-            
-            {/* ユーザー関連ボタン */}
+
             {currentUser ? (
               <div className="hidden sm:flex items-center space-x-2">
-                <span className="text-sm text-gray-600 max-w-24 truncate">
-                  {currentUser}
-                </span>
+                <span className="text-sm text-gray-600 max-w-24 truncate">{currentUser}</span>
               </div>
             ) : (
               <div className="hidden sm:flex items-center space-x-2">
@@ -104,8 +110,7 @@ export default function Header({
                 </button>
               </div>
             )}
-            
-            {/* メニューボタン */}
+
             <button
               onClick={onMenuClick}
               className="w-10 h-10 flex items-center justify-center bg-gray-100 hover:bg-orange-100 text-gray-600 hover:text-orange-600 rounded-full transition-all duration-200 cursor-pointer"
