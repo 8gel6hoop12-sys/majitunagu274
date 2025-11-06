@@ -3,13 +3,11 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+
   "scripts": {
     "dev": "vite",
-    "build": "next build && next export",
-    "preview": "vite preview --host --port 4173",
-    "predeploy": "cross-env BASE_PATH=/majitunagu/ vite build && node -e \"require('fs').copyFileSync('out/index.html','out/404.html')\"",
-    "deploy": "gh-pages -d out -b gh-pages -t true",
-    "start": "serve out -p 3000"
+    "build": "vite build",          
+    "preview": "vite preview"       
   },
   "dependencies": {
     "@stripe/react-stripe-js": "4.0.2",

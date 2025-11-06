@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="refresh" content="0; url=./" />
+    <script>
+      // 履歴を保ったまま index に戻す（サブパス対応）
+      (function() {
+        var l = window.location;
+        var base = (window.__BASE_PATH__ || '/');
+        if (!base.endsWith('/')) base += '/';
+        // 例: /<repo>/foo/bar → /<repo>/
+        var target = base;
+        history.replaceState(null, '', target);
+        window.location.replace(target);
+      })();
+    </script>
+    <title>Redirecting…</title>
+  </head>
+  <body>Redirecting…</body>
+</html>
