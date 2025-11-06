@@ -11,3 +11,5 @@ function App() {
 }
 
 export default App
+
+console.log('RUNNING FROM FRESH:', import.meta.url);

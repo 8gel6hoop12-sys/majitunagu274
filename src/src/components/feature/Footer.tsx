@@ -13,7 +13,7 @@ export default function Footer() {
                   <span className="text-white text-lg font-bold">🟧</span>
                 </div>
                 <h3 className="text-xl font-bold text-gray-900" style={{ fontFamily: '"Pacifico", serif' }}>
-                  マジつなぐ
+                  マジツナグ
                 </h3>
               </div>
               <p className="text-gray-600 text-sm leading-relaxed mb-4">

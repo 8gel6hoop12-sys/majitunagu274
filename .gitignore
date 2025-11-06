@@ -1,19 +1,12 @@
-﻿node_modules/
+
+# deps
+node_modules/
+# build output
+out/
+.next/
+# caches
+.vscode/
+
+node_modules/
 dist/
 out/
-docs/
-
-# logs
-npm-debug.log*
-yarn-*.log
-
-# editors
-.vscode/
-.idea/
-
-# env
-.env
-.env.*
-node_modules/
-out/
-.vercel/

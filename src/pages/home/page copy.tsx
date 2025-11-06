@@ -53,13 +53,15 @@ export default function Home() {
   const [favIds, setFavIds] = useLocalStorage<number[]>('favIds', []);
   const [currentUserEmail, setCurrentUserEmail] = useLocalStorage<string>('me_email', '');
   const [profiles, setProfiles] = useLocalStorage<Profile[]>('profiles', []);
- 
+  const [firstPopupDismissed, setFirstPopupDismissed] = useLocalStorage<string>('firstPopupDismissed', '');
+  
   // モーダル状態
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
   const [showJobModal, setShowJobModal] = useState(false);
   const [showDrawer, setShowDrawer] = useState(false);
+  const [showFirstPopup, setShowFirstPopup] = useState(false);
   const [showAdminModal, setShowAdminModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showContactModal, setShowContactModal] = useState(false);
@@ -111,7 +113,14 @@ export default function Home() {
     email: '',
     body: ''
   });
-    
+  
+  
+  // 初回ポップアップ表示
+  useEffect(() => {
+    if (!firstPopupDismissed) {
+      setShowFirstPopup(true);
+    }
+  }, [firstPopupDismissed]);
 
   // プロフィールフォーム初期化
   useEffect(() => {
@@ -205,6 +214,11 @@ export default function Home() {
     window.open(job.applyUrl, '_blank');
   };
   
+  const dismissFirstPopup = () => {
+    setFirstPopupDismissed('1');
+    setShowFirstPopup(false);
+  };
+
   const handleHomeClick = () => {
     setShowDrawer(false);
     setActiveYear('すべて');
@@ -953,6 +967,39 @@ export default function Home() {
         )}
       </Modal>
       
+      {/* 初回ポップアップ */}
+      <Modal
+        isOpen={showFirstPopup}
+        onClose={dismissFirstPopup}
+        title="マジつなぐへようこそ！"
+      >
+        <div className="text-center space-y-4">
+          <div className="h-32 bg-gradient-to-br from-orange-100 to-orange-200 rounded-lg flex items-center justify-center relative overflow-hidden">
+            <div className="absolute inset-0 bg-gradient-to-br from-orange-200/50 to-orange-300/30"></div>
+            <div className="relative">
+              <span className="text-4xl">🟧</span>
+              <div className="text-sm font-medium text-orange-800 mt-2">マジツナグ</div>
+            </div>
+          </div>
+          <p className="text-gray-700">
+            就活の不安を具体的な行動に変える、あなたの相談口です。
+          </p>
+          <Button
+            onClick={() => window.open('https://lin.ee/xxxxx', '_blank')}
+            className="w-full"
+          >
+            LINE友だち追加
+          </Button>
+          <Button
+            variant="outline"
+            onClick={dismissFirstPopup}
+            className="w-full"
+          >
+            後で
+          </Button>
+        </div>
+      </Modal>
+      
       {/* ドロワーメニュー */}
       {showDrawer && (
         <div className="fixed inset-0 z-50">
@@ -964,14 +1011,10 @@ export default function Home() {
             <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-orange-50 to-white">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-3">
-                   <img
-                      src="/assets/logo.png"
-                      alt="マジツナグ"
-                      className="h-8 sm:h-10 w-auto object-contain drop-shadow-sm transition-transform duration-150 group-hover:scale-[1.02]"
-                      loading="eager"
-                      decoding="async"
-                   />
-                  <h1 className="text-lg font-semibold text-gray-900">メニュー</h1>
+                  <div className="w-8 h-8 bg-gradient-to-br from-orange-400 to-orange-500 rounded-lg flex items-center justify-center">
+                    <span className="text-white text-sm font-bold">🟧</span>
+                  </div>
+                  <h2 className="text-lg font-semibold text-gray-900">メニュー</h2>
                 </div>
                 <button
                   onClick={() => setShowDrawer(false)}

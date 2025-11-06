@@ -36,9 +36,13 @@ export default function Hero() {
         <div className="w-full max-w-[min(88vw,520px)] md:max-w-[min(70vw,560px)] lg:max-w-[min(42vw,600px)] text-center">
           <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 sm:p-8 shadow-lg border border-orange-100/50">
             <div className="flex items-center justify-center mb-4">
-              <div className="w-12 h-12 bg-gradient-to-br from-orange-400 to-orange-500 rounded-xl flex items-center justify-center shadow-lg">
-                <span className="text-white text-xl font-bold">🟧</span>
-              </div>
+               <img
+                  src="/assets/logo.png"
+                  alt="マジツナグ"
+                  className="h-8 sm:h-10 w-auto object-contain drop-shadow-sm transition-transform duration-150 group-hover:scale-[1.02]"
+                  loading="eager"
+                  decoding="async"
+                />
             </div>
             
             <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-gray-900 mb-3 leading-tight">
